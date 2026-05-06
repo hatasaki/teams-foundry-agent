@@ -1,0 +1,6 @@
+# Build outputs (do not commit)
+dist/
+manifest.json
+color.png
+outline.png
+*.zip

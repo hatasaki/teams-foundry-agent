@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+*.zip
+bff_app_service.zip
+function_app.zip
+
+# Teams build outputs
+teams/dist/
+teams/manifest.json
+teams/color.png
+teams/outline.png
+!teams/.gitignore
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and local config
+*.log
+.env
+local.settings.json
+
+# Azure Functions
+.python_packages/
+bin/
+obj/

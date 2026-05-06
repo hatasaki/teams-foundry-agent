@@ -1,0 +1,4 @@
+azure-ai-projects>=2.0.0
+azure-identity
+jsonref
+openai

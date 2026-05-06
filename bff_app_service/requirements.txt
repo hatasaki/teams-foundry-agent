@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+gunicorn
+azure-identity
+azure-storage-blob
+azure-ai-projects>=2.0.0
+openai
+requests
+PyJWT[crypto]
+botbuilder-core
+botbuilder-schema
+botbuilder-integration-aiohttp

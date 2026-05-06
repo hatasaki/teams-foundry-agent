@@ -1,0 +1,22 @@
+# 既定はテキスト自動判定
+* text=auto
+
+# Linux App Service / Functions / Speech などで実行するシェルスクリプトは LF 固定
+*.sh text eol=lf
+
+# PowerShell スクリプトは Windows 中心なので CRLF 固定
+*.ps1 text eol=crlf
+
+# JSON / Python / Markdown は LF 固定（Linux 上で動く Functions / App Service と整合）
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+
+# バイナリは変換しない
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary

@@ -1,0 +1,93 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Teams Async Work Item Function Tool",
+    "version": "1.1.0",
+    "description": "Azure Functions-hosted tool endpoint for creating asynchronous Teams work items. The worker handles transcription/status/result and then calls the BFF internal callback."
+  },
+  "servers": [
+    {
+      "url": "{{FUNCTION_TOOL_BASE_URL}}"
+    }
+  ],
+  "paths": {
+    "/api/tools/create_work_item": {
+      "post": {
+        "operationId": "create_work_item",
+        "summary": "Create one asynchronous work item",
+        "description": "Create one asynchronous job. Do not poll from the agent. The Function worker will notify the BFF when complete.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "task_type",
+                  "instruction",
+                  "reply_ref_id"
+                ],
+                "properties": {
+                  "job_id": {
+                    "type": "string"
+                  },
+                  "task_type": {
+                    "type": "string",
+                    "enum": [
+                      "transcribe_only",
+                      "transcribe_and_report",
+                      "summarize",
+                      "translate",
+                      "mixed"
+                    ],
+                    "description": "Post-processing intent. Use transcribe_only when the user asks only for raw transcription."
+                  },
+                  "instruction": {
+                    "type": "string"
+                  },
+                  "file_refs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "blob_url": {
+                          "type": "string"
+                        },
+                        "content_type": {
+                          "type": "string"
+                        },
+                        "size": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  },
+                  "reply_ref_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Work item queued"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    }
+  }
+}
