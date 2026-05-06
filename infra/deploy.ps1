@@ -112,7 +112,15 @@ Invoke-Az group create -n $RG -l $LOC | Out-Null
 Invoke-Az identity create -g $RG -n $UAMI | Out-Null
 $UAMI_ID            = Invoke-Az identity show -g $RG -n $UAMI --query id -o tsv
 $UAMI_CLIENT_ID     = Invoke-Az identity show -g $RG -n $UAMI --query clientId -o tsv
-$UAMI_SP_OBJECT_ID  = Invoke-Az ad sp show --id $UAMI_CLIENT_ID --query id -o tsv
+# UAMI の Entra 伝搬を待機してから SP オブジェクト ID を取得
+$UAMI_SP_OBJECT_ID  = $null
+for ($i = 1; $i -le 12; $i++) {
+    try { $UAMI_SP_OBJECT_ID = Invoke-Az ad sp show --id $UAMI_CLIENT_ID --query id -o tsv } catch { $UAMI_SP_OBJECT_ID = $null }
+    if (-not [string]::IsNullOrEmpty($UAMI_SP_OBJECT_ID)) { break }
+    Write-Host "Waiting for UAMI service principal propagation... ($i)"
+    Start-Sleep -Seconds 10
+}
+if ([string]::IsNullOrEmpty($UAMI_SP_OBJECT_ID)) { throw "UAMI service principal did not propagate in time." }
 $TENANT_ID          = Invoke-Az account show --query tenantId -o tsv
 
 # ----------------------------------------------------------------------------
@@ -180,7 +188,13 @@ Set-Content -Path $functionApiRolesPath -Value $functionApiRolesJson -Encoding U
 
 Invoke-Az ad app update --id $FUNCTION_API_APP_ID --identifier-uris $FUNCTION_TOOL_AUDIENCE --app-roles "@$functionApiRolesPath" | Out-Null
 Invoke-AzAllowFailure ad sp create --id $FUNCTION_API_APP_ID
-$FUNCTION_API_SP_OBJECT_ID = Invoke-Az ad sp show --id $FUNCTION_API_APP_ID --query id -o tsv
+$FUNCTION_API_SP_OBJECT_ID = $null
+for ($i = 1; $i -le 12; $i++) {
+    try { $FUNCTION_API_SP_OBJECT_ID = Invoke-Az ad sp show --id $FUNCTION_API_APP_ID --query id -o tsv } catch { $FUNCTION_API_SP_OBJECT_ID = $null }
+    if (-not [string]::IsNullOrEmpty($FUNCTION_API_SP_OBJECT_ID)) { break }
+    Write-Host "Waiting for Function API SP propagation... ($i)"
+    Start-Sleep -Seconds 10
+}
 
 # Foundry MI に FunctionTool.Invoke を割り当て (Graph API)
 $assignFuncBody = "{`"principalId`":`"$FOUNDRY_OBJECT_ID`",`"resourceId`":`"$FUNCTION_API_SP_OBJECT_ID`",`"appRoleId`":`"$FUNCTION_TOOL_ROLE_ID`"}"
@@ -210,7 +224,13 @@ Set-Content -Path $bffApiRolesPath -Value $bffApiRolesJson -Encoding UTF8
 
 Invoke-Az ad app update --id $BFF_API_APP_ID --identifier-uris $BFF_INTERNAL_AUDIENCE --app-roles "@$bffApiRolesPath" | Out-Null
 Invoke-AzAllowFailure ad sp create --id $BFF_API_APP_ID
-$BFF_API_SP_OBJECT_ID = Invoke-Az ad sp show --id $BFF_API_APP_ID --query id -o tsv
+$BFF_API_SP_OBJECT_ID = $null
+for ($i = 1; $i -le 12; $i++) {
+    try { $BFF_API_SP_OBJECT_ID = Invoke-Az ad sp show --id $BFF_API_APP_ID --query id -o tsv } catch { $BFF_API_SP_OBJECT_ID = $null }
+    if (-not [string]::IsNullOrEmpty($BFF_API_SP_OBJECT_ID)) { break }
+    Write-Host "Waiting for BFF API SP propagation... ($i)"
+    Start-Sleep -Seconds 10
+}
 
 # UAMI (Function Worker) に BffInternal.Callback を割り当て
 $assignBffBody = "{`"principalId`":`"$UAMI_SP_OBJECT_ID`",`"resourceId`":`"$BFF_API_SP_OBJECT_ID`",`"appRoleId`":`"$BFF_ROLE_ID`"}"
@@ -219,7 +239,8 @@ Invoke-AzAllowFailure rest --method POST --uri "https://graph.microsoft.com/v1.0
 # ----------------------------------------------------------------------------
 # App Service (BFF) を作成し、UAMI をアタッチ + AppSettings 設定
 # ----------------------------------------------------------------------------
-Invoke-Az appservice plan create -g $RG -n $PLAN -l $LOC --sku B1 --is-linux | Out-Null
+$AppPlanSku = Get-EnvOrDefault "APP_PLAN_SKU" "B1"
+Invoke-Az appservice plan create -g $RG -n $PLAN -l $LOC --sku $AppPlanSku --is-linux | Out-Null
 Invoke-Az webapp create -g $RG -p $PLAN -n $BFFAPP --runtime "PYTHON:3.11" | Out-Null
 Invoke-Az webapp identity assign -g $RG -n $BFFAPP --identities $UAMI_ID | Out-Null
 
@@ -268,13 +289,28 @@ Invoke-Az functionapp identity assign -g $RG -n $FUNCAPP --identities $UAMI_ID |
 $FUNCAPP_ID = Invoke-Az functionapp show -g $RG -n $FUNCAPP --query id -o tsv
 Invoke-AzAllowFailure role assignment create --assignee-object-id $FOUNDRY_OBJECT_ID --assignee-principal-type ServicePrincipal --role "Reader" --scope $FUNCAPP_ID
 
+# Storage が Shared Key 禁止ポリシー下でも Functions のデプロイメントが可能なよう、
+# デプロイメントストレージ認証を UAMI に切り替える。
+Invoke-Az functionapp deployment config set -g $RG -n $FUNCAPP `
+    --deployment-storage-auth-type UserAssignedIdentity `
+    --deployment-storage-auth-value $UAMI_ID | Out-Null
+Invoke-AzAllowFailure functionapp config appsettings delete -g $RG -n $FUNCAPP --setting-names DEPLOYMENT_STORAGE_CONNECTION_STRING
+
+# Application Insights 接続文字列を取得 (az functionapp create が自動作成)
+$AppInsightsConnStr = $null
+try { $AppInsightsConnStr = & az monitor app-insights component show -g $RG --app $FUNCAPP --query connectionString -o tsv 2>$null } catch { $AppInsightsConnStr = $null }
+
 # AzureWebJobsStorage を MI 接続に切り替え
 Invoke-AzAllowFailure functionapp config appsettings delete -g $RG -n $FUNCAPP --setting-names AzureWebJobsStorage
 
 Invoke-Az functionapp config appsettings set -g $RG -n $FUNCAPP --settings `
     "AzureWebJobsStorage__accountName=$STORAGE" `
+    "AzureWebJobsStorage__blobServiceUri=https://$STORAGE.blob.core.windows.net" `
+    "AzureWebJobsStorage__queueServiceUri=https://$STORAGE.queue.core.windows.net" `
+    "AzureWebJobsStorage__tableServiceUri=https://$STORAGE.table.core.windows.net" `
     "AzureWebJobsStorage__credential=managedidentity" `
     "AzureWebJobsStorage__clientId=$UAMI_CLIENT_ID" `
+    "WORK_STORAGE__blobServiceUri=https://$STORAGE.blob.core.windows.net" `
     "WORK_STORAGE__queueServiceUri=https://$STORAGE.queue.core.windows.net" `
     "WORK_STORAGE__credential=managedidentity" `
     "WORK_STORAGE__clientId=$UAMI_CLIENT_ID" `
@@ -294,6 +330,11 @@ Invoke-Az functionapp config appsettings set -g $RG -n $FUNCAPP --settings `
     "SPEECH_API_VERSION=2025-10-15" `
     "DEFAULT_LOCALE=ja-JP" | Out-Null
 
+# AppInsights 接続文字列は値に ; を含むため独立して設定
+if (-not [string]::IsNullOrEmpty($AppInsightsConnStr)) {
+    Invoke-Az functionapp config appsettings set -g $RG -n $FUNCAPP --settings "APPLICATIONINSIGHTS_CONNECTION_STRING=$AppInsightsConnStr" | Out-Null
+}
+
 # Function コードのビルドとデプロイ。venv のアクティベート方法は OS で異なる
 Push-Location (Join-Path $RootDir "function_app")
 try {
@@ -303,9 +344,9 @@ try {
     } else {
         $venvPython = Join-Path (Resolve-Path ".venv") "bin/python"
     }
-    & $venvPython -m pip install --quiet -r requirements.txt
+    & $venvPython -m pip install --quiet --no-compile -r requirements.txt
     & $venvPython -m py_compile function_app.py
-    & func azure functionapp publish $FUNCAPP --python
+    & func azure functionapp publish $FUNCAPP --python --build remote
     if ($LASTEXITCODE -ne 0) { throw "func publish failed" }
 }
 finally {
@@ -338,7 +379,7 @@ try {
     } else {
         $venvPython = Join-Path (Resolve-Path ".venv") "bin/python"
     }
-    & $venvPython -m pip install --quiet -r requirements.txt
+    & $venvPython -m pip install --quiet --no-compile -r requirements.txt
 
     # Agent 作成スクリプトに渡す環境変数を設定
     $env:FUNCTION_TOOL_BASE_URL            = "https://$FUNCAPP.azurewebsites.net"

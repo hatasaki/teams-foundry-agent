@@ -37,7 +37,18 @@ az group create -n "$RG" -l "$LOC"
 az identity create -g "$RG" -n "$UAMI"
 UAMI_ID=$(az identity show -g "$RG" -n "$UAMI" --query id -o tsv)
 UAMI_CLIENT_ID=$(az identity show -g "$RG" -n "$UAMI" --query clientId -o tsv)
-UAMI_SP_OBJECT_ID=$(az ad sp show --id "$UAMI_CLIENT_ID" --query id -o tsv)
+# UAMI の Entra 伝搬を待機してから SP オブジェクト ID を取得
+UAMI_SP_OBJECT_ID=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  UAMI_SP_OBJECT_ID=$(az ad sp show --id "$UAMI_CLIENT_ID" --query id -o tsv 2>/dev/null || true)
+  if [ -n "$UAMI_SP_OBJECT_ID" ]; then break; fi
+  echo "Waiting for UAMI service principal propagation... ($i)"
+  sleep 10
+done
+if [ -z "$UAMI_SP_OBJECT_ID" ]; then
+  echo "ERROR: UAMI service principal did not propagate in time." >&2
+  exit 1
+fi
 TENANT_ID=$(az account show --query tenantId -o tsv)
 
 # ストレージ: 入力・出力・ジョブコード・会話参照コンテナ + キューを作成
@@ -96,7 +107,13 @@ cat > "$TMP_DIR/function-api-roles.json" <<EOF
 EOF
 az ad app update --id "$FUNCTION_API_APP_ID" --identifier-uris "$FUNCTION_TOOL_AUDIENCE" --app-roles @"$TMP_DIR/function-api-roles.json"
 az ad sp create --id "$FUNCTION_API_APP_ID" >/dev/null || true
-FUNCTION_API_SP_OBJECT_ID=$(az ad sp show --id "$FUNCTION_API_APP_ID" --query id -o tsv)
+FUNCTION_API_SP_OBJECT_ID=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  FUNCTION_API_SP_OBJECT_ID=$(az ad sp show --id "$FUNCTION_API_APP_ID" --query id -o tsv 2>/dev/null || true)
+  if [ -n "$FUNCTION_API_SP_OBJECT_ID" ]; then break; fi
+  echo "Waiting for Function API SP propagation... ($i)"
+  sleep 10
+done
 
 # Foundry マネージド ID に FunctionTool.Invoke ロールを割り当て (Graph 経由)
 az rest --method POST \
@@ -121,7 +138,13 @@ cat > "$TMP_DIR/bff-api-roles.json" <<EOF
 EOF
 az ad app update --id "$BFF_API_APP_ID" --identifier-uris "$BFF_INTERNAL_AUDIENCE" --app-roles @"$TMP_DIR/bff-api-roles.json"
 az ad sp create --id "$BFF_API_APP_ID" >/dev/null || true
-BFF_API_SP_OBJECT_ID=$(az ad sp show --id "$BFF_API_APP_ID" --query id -o tsv)
+BFF_API_SP_OBJECT_ID=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  BFF_API_SP_OBJECT_ID=$(az ad sp show --id "$BFF_API_APP_ID" --query id -o tsv 2>/dev/null || true)
+  if [ -n "$BFF_API_SP_OBJECT_ID" ]; then break; fi
+  echo "Waiting for BFF API SP propagation... ($i)"
+  sleep 10
+done
 
 # Function Worker が使う UAMI に BffInternal.Callback ロールを割り当て
 az rest --method POST \
@@ -129,7 +152,7 @@ az rest --method POST \
   --body "{\"principalId\":\"${UAMI_SP_OBJECT_ID}\",\"resourceId\":\"${BFF_API_SP_OBJECT_ID}\",\"appRoleId\":\"${BFF_ROLE_ID}\"}" || true
 
 # App Service (BFF) プランと Web アプリを作成し、UAMI をアタッチ
-az appservice plan create -g "$RG" -n "$PLAN" -l "$LOC" --sku B1 --is-linux
+az appservice plan create -g "$RG" -n "$PLAN" -l "$LOC" --sku "${APP_PLAN_SKU:-B1}" --is-linux
 az webapp create -g "$RG" -p "$PLAN" -n "$BFFAPP" --runtime "PYTHON:3.11"
 az webapp identity assign -g "$RG" -n "$BFFAPP" --identities "$UAMI_ID"
 
@@ -172,12 +195,27 @@ az functionapp identity assign -g "$RG" -n "$FUNCAPP" --identities "$UAMI_ID"
 FUNCAPP_ID=$(az functionapp show -g "$RG" -n "$FUNCAPP" --query id -o tsv)
 az role assignment create --assignee-object-id "$FOUNDRY_OBJECT_ID" --assignee-principal-type ServicePrincipal --role "Reader" --scope "$FUNCAPP_ID" || true
 
-# AzureWebJobsStorage / WORK_STORAGE を Managed Identity 接続に切り替えて App Settings を設定
+# Storage アカウントが共有キーアクセス禁止ポリシー下でも Functions のリモートビルド/デプロイができるよう、
+# デプロイメントストレージ認証を UAMI に切り替え、既定の接続文字列設定を削除する。
+az functionapp deployment config set -g "$RG" -n "$FUNCAPP" \
+  --deployment-storage-auth-type UserAssignedIdentity \
+  --deployment-storage-auth-value "$UAMI_ID"
+az functionapp config appsettings delete -g "$RG" -n "$FUNCAPP" --setting-names DEPLOYMENT_STORAGE_CONNECTION_STRING || true
+
+# Application Insights の接続文字列を取得（az functionapp create が自動作成したリソース）
+APPINSIGHTS_CONNSTR=$(az monitor app-insights component show -g "$RG" --app "$FUNCAPP" --query connectionString -o tsv 2>/dev/null || true)
+
+# AzureWebJobsStorage / WORK_STORAGE を Managed Identity 接続に切り替えて App Settings を設定。
+# Identity-based 接続では accountName だけでなく blob/queue/table の各 Service URI を明示する必要がある。
 az functionapp config appsettings delete -g "$RG" -n "$FUNCAPP" --setting-names AzureWebJobsStorage || true
 az functionapp config appsettings set -g "$RG" -n "$FUNCAPP" --settings \
   "AzureWebJobsStorage__accountName=$STORAGE" \
+  "AzureWebJobsStorage__blobServiceUri=https://${STORAGE}.blob.core.windows.net" \
+  "AzureWebJobsStorage__queueServiceUri=https://${STORAGE}.queue.core.windows.net" \
+  "AzureWebJobsStorage__tableServiceUri=https://${STORAGE}.table.core.windows.net" \
   "AzureWebJobsStorage__credential=managedidentity" \
   "AzureWebJobsStorage__clientId=$UAMI_CLIENT_ID" \
+  "WORK_STORAGE__blobServiceUri=https://${STORAGE}.blob.core.windows.net" \
   "WORK_STORAGE__queueServiceUri=https://${STORAGE}.queue.core.windows.net" \
   "WORK_STORAGE__credential=managedidentity" \
   "WORK_STORAGE__clientId=$UAMI_CLIENT_ID" \
@@ -197,13 +235,22 @@ az functionapp config appsettings set -g "$RG" -n "$FUNCAPP" --settings \
   "SPEECH_API_VERSION=2025-10-15" \
   "DEFAULT_LOCALE=ja-JP"
 
+# Application Insights 接続文字列を別途設定（取得できた場合のみ）。値に ; が含まれるため独立して設定する。
+if [ -n "${APPINSIGHTS_CONNSTR}" ]; then
+  az functionapp config appsettings set -g "$RG" -n "$FUNCAPP" --settings \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=${APPINSIGHTS_CONNSTR}" >/dev/null
+fi
+
 # Function コードをビルドし、Functions Core Tools でデプロイ
+# Storage アカウントが Shared Key 無効の組織ポリシー下では Azure 側のリモートビルドを使う必要がある。
 pushd "$ROOT_DIR/function_app"
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+# Python 3.14 環境でのバイトコンパイル失敗を避けつつ requirements を展開する
+pip install --no-compile -r requirements.txt
 python -m py_compile function_app.py
-func azure functionapp publish "$FUNCAPP"
+func azure functionapp publish "$FUNCAPP" --python --build remote
+deactivate
 popd
 
 # Azure Bot リソースを作成し、メッセージエンドポイントを BFF に向ける
@@ -224,7 +271,7 @@ az bot msteams create -g "$RG" -n "$BOT_NAME" || true
 pushd "$ROOT_DIR/agent"
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --no-compile -r requirements.txt
 export FUNCTION_TOOL_BASE_URL="https://${FUNCAPP}.azurewebsites.net"
 export FUNCTION_TOOL_AUDIENCE="$FUNCTION_TOOL_AUDIENCE"
 export FOUNDRY_AGENT_NAME="$FOUNDRY_AGENT_NAME"
@@ -232,6 +279,7 @@ python create_foundry_agent.py
 # 后処理 Agent（ツールなし、要約/議事録化/翻訳を担当）を作成/更新
 export FOUNDRY_POSTPROCESS_AGENT_NAME="$FOUNDRY_POSTPROCESS_AGENT_NAME"
 python create_postprocess_agent.py
+deactivate
 popd
 
 cat <<EOF

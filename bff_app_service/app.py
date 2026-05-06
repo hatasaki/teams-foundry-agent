@@ -56,11 +56,18 @@ credential = DefaultAzureCredential()
 
 
 class BotConfig:
-    # Azure Bot Service は BFF と同じユーザー割り当てマネージド ID を使用する
-    MicrosoftAppType = os.getenv("MicrosoftAppType", "UserAssignedMSI")
-    MicrosoftAppId = BOT_APP_ID
-    MicrosoftAppPassword = os.getenv("MicrosoftAppPassword", "")
-    MicrosoftAppTenantId = TENANT_ID
+    # Azure Bot Service は BFF と同じユーザー割り当てマネージド ID を使用する。
+    # Bot Framework SDK の ConfigurationServiceClientCredentialFactory は
+    # APP_TYPE / APP_ID / APP_PASSWORD / APP_TENANTID 属性を読み取るため、
+    # 互換性のため両方の属性名を公開する。
+    APP_TYPE = os.getenv("MicrosoftAppType", "UserAssignedMSI")
+    APP_ID = BOT_APP_ID
+    APP_PASSWORD = os.getenv("MicrosoftAppPassword", "")
+    APP_TENANTID = TENANT_ID
+    MicrosoftAppType = APP_TYPE
+    MicrosoftAppId = APP_ID
+    MicrosoftAppPassword = APP_PASSWORD
+    MicrosoftAppTenantId = APP_TENANTID
 
 
 # Bot Framework のアダプタ。Teams からのアクティビティ処理とプロアクティブ送信に利用
@@ -284,7 +291,7 @@ async def messages(request: Request, authorization: Optional[str] = Header(defau
         file_refs = await save_incoming_teams_attachments(turn_context.activity, job_id)
 
         # ユーザーに受付したことを即時返信
-        await turn_context.send_activity("ご依頼を確認しています。添付ファイルがある場合は安全なストレージに保存しました。")
+        await turn_context.send_activity("ご依頼を受け付けました")
 
         try:
             # Foundry Agent を呼び出し、直接返信 or ツール起動をルーティングさせる

@@ -130,6 +130,14 @@ SPEECH_RG                     Speech リソースの RG 名
 SPEECH_ACCOUNT                Speech アカウント名
 ```
 
+任意で上書き可能な代表的な変数:
+
+| 変数 | 既定 | 用途 |
+|---|---|---|
+| `RG` | `rg-teams-foundry-callback` | リソースグループ名 |
+| `LOC` | `japaneast` | リージョン |
+| `APP_PLAN_SKU` | `B1` | App Service Plan の SKU。リージョンの Basic クォータが不足する場合は `S1` などへ変更 |
+
 ## 5. デプロイ実行
 
 ### Linux / macOS / WSL の場合
@@ -167,9 +175,11 @@ $env:SPEECH_ACCOUNT = "<speech-account>"
 4. Function Tool API と BFF Internal API の Entra アプリ登録を作成しアプリロールを定義
 5. Foundry MI に `FunctionTool.Invoke`、UAMI に `BffInternal.Callback` を割り当て
 6. App Service (Linux/Python 3.11) を作成し BFF をデプロイ
-7. Function App (Flex Consumption / Python 3.11) を作成し Functions コードをデプロイ
+7. Function App (Flex Consumption / Python 3.11) を作成し、デプロイメントストレージ認証を UAMI に切替えてから Functions コードをデプロイ
 8. Azure Bot を作成し Microsoft Teams チャネルを有効化
 9. Foundry にルーティング Agent と後処理 Agent を作成/更新
+
+> Storage アカウントは作成時から **Shared Key アクセス無効** で、Functions のランタイム接続もデプロイメントストレージ接続もすべて UAMI 経由で行います。組織ポリシーでキー認証が禁止されている環境でもそのまま動作します。
 
 ## 6. デプロイ出力値の確認
 
