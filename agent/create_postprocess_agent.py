@@ -7,7 +7,7 @@ from azure.identity import DefaultAzureCredential
 
 # このスクリプトは Foundry プロジェクトに後処理用 Agent を作成/更新する。
 # Functions の Queue Worker から呼ばれ、トランスクリプトやテキスト入力に対して
-# 要約・議事録化・翻訳・レポート作成などの後処理を行う。ツールは持たない。
+# 要約・翻訳・レポート作成などの後処理を行う。ツールは持たない。
 PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 MODEL_DEPLOYMENT_NAME = os.environ["FOUNDRY_MODEL_DEPLOYMENT_NAME"]
 AGENT_NAME = os.getenv("FOUNDRY_POSTPROCESS_AGENT_NAME", "teams-postprocess-agent")

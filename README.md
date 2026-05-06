@@ -1,6 +1,6 @@
 # Teams + App Service BFF + Functions ツール/Worker + BFF 内部コールバック構成
 
-このサンプルは、Microsoft Teams から音声/動画/テキストファイルを受け取り、Azure AI Speech によるバッチ文字起こしと Microsoft Foundry Agent による後処理（議事録化・要約・翻訳など）を行ったうえで、Teams にプロアクティブに結果を返すアプリです。Teams / Bot Framework まわりは BFF が一手に担当し、長時間処理は Functions のキュー Worker が非同期で実行します。
+このサンプルは、Microsoft Teams から音声/動画/テキストファイルを受け取り、Azure AI Speech によるバッチ文字起こしと Microsoft Foundry Agent による後処理（レポート化・要約・翻訳など）を行ったうえで、Teams にプロアクティブに結果を返すアプリです。Teams / Bot Framework まわりは BFF が一手に担当し、長時間処理は Functions のキュー Worker が非同期で実行します。
 
 ## アーキテクチャ
 
@@ -30,7 +30,7 @@ flowchart LR
 
     subgraph Foundry["Microsoft Foundry"]
         Router["ルーティング Agent<br/>teams-work-router-agent<br/>(指示解釈 + task_type 決定)"]
-        Post["後処理 Agent<br/>teams-postprocess-agent<br/>(議事録化 / 要約 / 翻訳)"]
+        Post["後処理 Agent<br/>teams-postprocess-agent<br/>(レポート化 / 要約 / 翻訳)"]
         Speech["Azure AI Speech<br/>(Batch Transcription)"]
     end
 
@@ -69,6 +69,50 @@ flowchart LR
     class Blob,Queue store;
 ```
 
+### シーケンス図（音声ファイルのレポート化フロー例）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Teams ユーザー
+    participant Bot as Azure Bot Service
+    participant BFF as App Service BFF
+    participant Router as Foundry<br/>ルーティング Agent
+    participant Tool as Functions<br/>create_work_item
+    participant Queue as Storage Queue<br/>work-items
+    participant Worker as Functions<br/>Queue Worker
+    participant Blob as Storage Blob
+    participant Speech as Azure AI Speech
+    participant Post as Foundry<br/>後処理 Agent
+
+    User->>Bot: メッセージ + 音声添付
+    Bot->>BFF: POST /api/messages
+    BFF->>Blob: 添付保存 (input/) + 会話参照保存
+    BFF-->>User: 「ご依頼を受け付けました」(即時返信)
+
+    BFF->>Router: 指示 + 添付参照
+    Router->>Tool: create_work_item<br/>(JWT: FunctionTool.Invoke)
+    Tool->>Blob: ジョブ JSON 作成 (jobs/)
+    Tool->>Queue: メッセージ enqueue
+    Tool-->>Router: job_id
+    Router-->>BFF: 受付応答
+
+    Queue-->>Worker: dequeue
+    Worker->>Speech: Batch Transcription 開始
+    Worker->>Speech: ステータスポーリング
+    Speech-->>Worker: 完了 + transcript
+    Worker->>Blob: transcript.txt 保存 (output/)
+
+    Worker->>Post: transcript + 指示
+    Post-->>Worker: レポート化
+    Worker->>Blob: result.md 保存 (output/) + ジョブ更新
+
+    Worker->>BFF: POST /internal/jobs/:id/complete<br/>(JWT: BffInternal.Callback)
+    BFF->>Blob: 会話参照取得
+    BFF->>Bot: プロアクティブメッセージ送信
+    Bot->>User: レポートを返信
+```
+
 ## 設計方針
 
 - BFF が Teams / Bot Framework まわりを単独で担当する。
@@ -83,14 +127,14 @@ flowchart LR
 | Agent | 名前（既定） | 役割 | ツール |
 |---|---|---|---|
 | ルーティング Agent | `teams-work-router-agent` | Teams の指示を解釈し、`task_type` を決定して `create_work_item` を 1 回だけ呼ぶ | OpenAPI ツール (`create_work_item`) |
-| 後処理 Agent | `teams-postprocess-agent` | トランスクリプトやテキストを `task_type` に応じて議事録化・要約・翻訳・整形する | なし |
+| 後処理 Agent | `teams-postprocess-agent` | トランスクリプトやテキストを `task_type` に応じてレポート化・要約・翻訳・整形する | なし |
 
 `task_type` の値:
 
 | 値 | 後処理 |
 |---|---|
 | `transcribe_only` | 後処理 Agent をスキップし、トランスクリプトをそのまま返す |
-| `transcribe_and_report` | 後処理 Agent が議事録（要点 / 決定事項 / TODO / 懸念点）を生成 |
+| `transcribe_and_report` | 後処理 Agent がレポート（要点 / 決定事項 / TODO / 懸念点）を生成 |
 | `summarize` | 後処理 Agent が要約を生成 |
 | `translate` | 後処理 Agent が翻訳を生成 |
 | `mixed` | 後処理 Agent が指示文を解釈して応答 |
@@ -336,7 +380,7 @@ Teams の個人チャットで Bot にメッセージを送り、`task_type` ご
 |---|---|
 | 「こんにちは」（添付なし） | ルーティング Agent が直接応答（ツール呼ばない） |
 | 録音.wav + 「テキスト化して」 | `transcribe_only` → トランスクリプトをそのまま返信 |
-| 録音.wav + 「会議レポートを作成して」 | `transcribe_and_report` → 議事録 Markdown を返信 |
+| 録音.wav + 「レポートを作成して」 | `transcribe_and_report` → レポート Markdown を返信 |
 | 録音.wav + 「英語に翻訳して」 | `translate` → 翻訳テキストを返信 |
 | log.txt + 「要約して」 | `summarize` → 要約を返信 |
 
