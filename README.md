@@ -20,92 +20,53 @@ Teams
 
 ```mermaid
 flowchart LR
-    User["👤 Teams ユーザー"]
+    Teams["Microsoft Teams"]
+    Bot["Azure Bot Service"]
 
-    subgraph Teams["Microsoft Teams"]
-        TeamsClient["Teams クライアント"]
+    subgraph BFF["App Service (BFF / FastAPI)"]
+        BFFMsg["/api/messages<br/>Teams 受信・添付保存・<br/>ルーティング Agent 呼び出し"]
+        BFFCb["/internal/jobs/:id/complete · failed<br/>JWT 検証 + プロアクティブ送信"]
     end
 
-    subgraph Azure["Azure サブスクリプション"]
-        Bot["Azure Bot Service<br/>(Teams チャネル)"]
-
-        subgraph BFFBlock["App Service (BFF / FastAPI)"]
-            BFFMsg["/api/messages"]
-            BFFCb["/internal/jobs/{id}/complete<br/>/internal/jobs/{id}/failed"]
-        end
-
-        subgraph Foundry["Microsoft Foundry プロジェクト"]
-            Router["ルーティング Agent<br/>teams-work-router-agent"]
-            Post["後処理 Agent<br/>teams-postprocess-agent"]
-        end
-
-        subgraph Func["Azure Functions (Flex Consumption / Python)"]
-            ToolEp["HTTP /api/tools/create_work_item"]
-            Worker["Queue Worker<br/>process_work_item"]
-        end
-
-        subgraph Storage["Azure Storage (Shared Key 無効 / UAMI 認証)"]
-            ContInput[("Blob: input")]
-            ContOutput[("Blob: output")]
-            ContJobs[("Blob: jobs")]
-            ContConv[("Blob: conversation-refs")]
-            Queue[["Queue: work-items"]]
-        end
-
+    subgraph Foundry["Microsoft Foundry"]
+        Router["ルーティング Agent<br/>teams-work-router-agent<br/>(指示解釈 + task_type 決定)"]
+        Post["後処理 Agent<br/>teams-postprocess-agent<br/>(議事録化 / 要約 / 翻訳)"]
         Speech["Azure AI Speech<br/>(Batch Transcription)"]
-
-        subgraph Entra["Microsoft Entra"]
-            UAMI(["UAMI<br/>uami-teams-foundry"])
-            FuncApi["Function Tool API<br/>(FunctionTool.Invoke)"]
-            BffApi["BFF Internal API<br/>(BffInternal.Callback)"]
-        end
     end
 
-    %% ユーザー → Teams 送信フロー
-    User -->|メッセージ + 添付| TeamsClient
-    TeamsClient -->|アクティビティ| Bot
-    Bot -->|POST /api/messages| BFFMsg
+    subgraph Func["Azure Functions (Flex Consumption)"]
+        Tool["/api/tools/create_work_item<br/>Foundry OpenAPI ツール<br/>(JWT 検証 + ジョブ生成)"]
+        Worker["process_work_item<br/>Queue Worker<br/>(Speech Batch + 後処理 + コールバック)"]
+    end
 
-    %% BFF → 添付保存 → ルーティング
-    BFFMsg -->|添付保存| ContInput
-    BFFMsg -->|conversation 参照保存| ContConv
-    BFFMsg -->|プロンプト送信| Router
-    Router -->|ツール呼び出し<br/>JWT: FunctionTool.Invoke| ToolEp
-    ToolEp -->|ジョブ JSON| ContJobs
-    ToolEp -->|エンキュー| Queue
+    subgraph Storage["Azure Storage"]
+        Blob[("Blob<br/>input / output /<br/>jobs / conversation-refs")]
+        Queue[["Queue<br/>work-items"]]
+    end
 
-    %% Queue Worker 処理
-    Queue -->|dequeue| Worker
-    Worker -->|入力 Blob 参照| ContInput
-    Worker -->|Batch 実行| Speech
-    Speech -->|結果 Blob| ContOutput
-    Worker -->|要約/議事録/翻訳| Post
-    Post -->|応答テキスト| Worker
-    Worker -->|結果 Blob| ContOutput
-    Worker -->|ジョブ更新| ContJobs
+    Teams <--> Bot
+    Bot <--> BFFMsg
+    BFFMsg <--> Router
+    Router --> Tool
+    Tool --> Worker
+    Worker <--> Speech
+    Worker <--> Post
+    Worker --> BFFCb
+    BFFCb --> Bot
 
-    %% コールバック → プロアクティブ送信
-    Worker -->|POST /internal/jobs/{id}/complete<br/>JWT: BffInternal.Callback| BFFCb
-    BFFCb -->|conversation 参照取得| ContConv
-    BFFCb -->|プロアクティブ送信| Bot
-    Bot -->|応答メッセージ| TeamsClient
-    TeamsClient -->|結果| User
+    BFFMsg -. 添付/参照 .-> Blob
+    Tool -. ジョブ JSON .-> Blob
+    Tool -. エンキュー .-> Queue
+    Queue -. dequeue .-> Worker
+    Worker -. 結果 + ジョブ更新 .-> Blob
+    BFFCb -. 参照取得 .-> Blob
 
-    %% ID とロール (点線)
-    UAMI -.->|認証| BFFMsg
-    UAMI -.->|認証| Worker
-    UAMI -.->|認証| ToolEp
-    Router -.->|appRole| FuncApi
-    UAMI -.->|appRole| BffApi
-
-    classDef azureSvc fill:#0078D4,stroke:#fff,color:#fff;
-    classDef storage fill:#1f8a3a,stroke:#fff,color:#fff;
-    classDef entra fill:#742774,stroke:#fff,color:#fff;
-    classDef foundry fill:#8a4ddb,stroke:#fff,color:#fff;
-    class Bot,BFFMsg,BFFCb,ToolEp,Worker,Speech azureSvc;
-    class ContInput,ContOutput,ContJobs,ContConv,Queue storage;
-    class UAMI,FuncApi,BffApi entra;
-    class Router,Post foundry;
+    classDef azure fill:#0078D4,stroke:#fff,color:#fff;
+    classDef ai fill:#8a4ddb,stroke:#fff,color:#fff;
+    classDef store fill:#1f8a3a,stroke:#fff,color:#fff;
+    class Bot,BFFMsg,BFFCb,Tool,Worker azure;
+    class Speech,Router,Post ai;
+    class Blob,Queue store;
 ```
 
 ## 設計方針
