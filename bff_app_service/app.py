@@ -119,10 +119,12 @@ def download_json(container: str, name: str) -> Dict[str, Any]:
     return json.loads(client.download_blob().readall().decode("utf-8"))
 
 
-def save_conversation_reference(activity: Activity, reply_ref_id: str) -> str:
-    # 後でプロアクティブ送信するために会話参照（ConversationReference）を保存する
+def save_conversation_reference(activity: Activity, ref_key: str) -> str:
+    # 後でプロアクティブ送信するために会話参照（ConversationReference）を保存する。
+    # ref_key は job_id を使う（LLM が変形しがちな reply_ref_id ではなく、callback URL に
+    # そのまま含まれる job_id をキーにすることで、UUID 破壊耐性を持たせる）。
     reference = TurnContext.get_conversation_reference(activity)
-    return upload_json(CONVERSATIONS_CONTAINER, f"{reply_ref_id}.json", reference.serialize())
+    return upload_json(CONVERSATIONS_CONTAINER, f"{ref_key}.json", reference.serialize())
 
 
 async def save_incoming_teams_attachments(activity: Activity, job_id: str) -> List[Dict[str, Any]]:
@@ -247,9 +249,10 @@ def validate_internal_callback_token(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Required app role is missing")
 
 
-async def send_teams_message(reply_ref_id: str, text: str):
-    # 保存済みの ConversationReference を復元し、Teams にプロアクティブメッセージを送信
-    ref_dict = download_json(CONVERSATIONS_CONTAINER, f"{reply_ref_id}.json")
+async def send_teams_message(ref_key: str, text: str):
+    # 保存済みの ConversationReference を復元し、Teams にプロアクティブメッセージを送信。
+    # ref_key は会話参照を保存した時のキー（現行は job_id）。
+    ref_dict = download_json(CONVERSATIONS_CONTAINER, f"{ref_key}.json")
     reference = ConversationReference().deserialize(ref_dict)
 
     async def callback(turn_context: TurnContext):
@@ -282,12 +285,14 @@ async def messages(request: Request, authorization: Optional[str] = Header(defau
             return
 
         user_text = (turn_context.activity.text or "").strip()
-        # ジョブ ID と返信用参照 ID を生成（会話参照は reply_ref_id で Blob に保存）
+        # ジョブ ID と返信用参照 ID を生成。会話参照は job_id をキーに保存する。
+        # （Foundry Agent (LLM) が reply_ref_id を破壊することがあるが、callback URL の
+        # job_id は Function 側でツール経由ではなくキューメッセージ経由で正確に伝わるため安全）
         job_id = str(uuid.uuid4())
         reply_ref_id = str(uuid.uuid4())
 
-        # 後のプロアクティブ送信のために会話参照と添付ファイルを保存
-        save_conversation_reference(turn_context.activity, reply_ref_id)
+        # 後のプロアクティブ送信のために会話参照と添付ファイルを保存（job_id をキーに）
+        save_conversation_reference(turn_context.activity, job_id)
         file_refs = await save_incoming_teams_attachments(turn_context.activity, job_id)
 
         # ユーザーに受付したことを即時返信
@@ -320,8 +325,8 @@ async def job_complete(job_id: str, request: Request, authorization: Optional[st
     payload = await request.json()
 
     reply_ref_id = payload.get("reply_ref_id")
-    if not reply_ref_id:
-        raise HTTPException(status_code=400, detail="reply_ref_id is required")
+    # callback URL の job_id をキーに会話参照を取得（reply_ref_id は LLM 経由で
+    # 破壊されている可能性があるため fallback としては利用しない）。
 
     result_text = payload.get("result_text") or ""
     result_url = payload.get("result_url")
@@ -339,8 +344,8 @@ async def job_complete(job_id: str, request: Request, authorization: Optional[st
         message += "\n".join(details) + "\n\n"
     message += result_text
 
-    # Teams にプロアクティブ送信
-    await send_teams_message(reply_ref_id, message)
+    # Teams にプロアクティブ送信（job_id をキーに保存された ConversationReference を利用）
+    await send_teams_message(job_id, message)
     return {"ok": True, "job_id": job_id, "notified": True}
 
 
@@ -351,10 +356,7 @@ async def job_failed(job_id: str, request: Request, authorization: Optional[str]
     validate_internal_callback_token(authorization)
     payload = await request.json()
 
-    reply_ref_id = payload.get("reply_ref_id")
-    if not reply_ref_id:
-        raise HTTPException(status_code=400, detail="reply_ref_id is required")
-
     error = payload.get("error") or "Unknown error"
-    await send_teams_message(reply_ref_id, f"ジョブ {job_id} は失敗しました。\n\n{error}")
+    # Teams にプロアクティブ送信（job_id をキーに保存された ConversationReference を利用）
+    await send_teams_message(job_id, f"ジョブ {job_id} は失敗しました。\n\n{error}")
     return {"ok": True, "job_id": job_id, "notified": True}

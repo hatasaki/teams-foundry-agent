@@ -3,16 +3,16 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import azure.functions as func
 import jwt
 import requests
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
 from azure.storage.queue import QueueClient
 
 
@@ -221,6 +221,38 @@ def speech_token() -> str:
     return credential.get_token("https://cognitiveservices.azure.com/.default").token
 
 
+def build_blob_sas_url(blob_url: str, validity_hours: int = 6) -> str:
+    """Blob URL に User Delegation SAS を付加して Speech Batch から取得可能な URL を返す。
+
+    Storage アカウントが Shared Key 無効・パブリックアクセス無効でも、UAMI で取得した
+    User Delegation Key を使えば SAS を発行できる。Speech Batch の contentUrls は
+    認証ヘッダーを付けずに blob を取得するため SAS が必要。
+    """
+    parsed = urlparse(blob_url)
+    # https://<account>.blob.core.windows.net/<container>/<blob...>
+    account = parsed.netloc.split(".")[0]
+    parts = parsed.path.lstrip("/").split("/", 1)
+    if len(parts) != 2:
+        return blob_url
+    container, blob_name = parts
+
+    now = datetime.now(timezone.utc)
+    udk = blob_service().get_user_delegation_key(
+        key_start_time=now - timedelta(minutes=5),
+        key_expiry_time=now + timedelta(hours=validity_hours),
+    )
+    sas = generate_blob_sas(
+        account_name=account,
+        container_name=container,
+        blob_name=blob_name,
+        user_delegation_key=udk,
+        permission=BlobSasPermissions(read=True),
+        start=now - timedelta(minutes=5),
+        expiry=now + timedelta(hours=validity_hours),
+    )
+    return f"{blob_url}?{sas}"
+
+
 def speech_headers() -> Dict[str, str]:
     # Speech REST API 要求用の Authorization ヘッダー
     return {
@@ -248,6 +280,9 @@ def submit_speech_batch(audio_urls: List[str], display_name: str) -> Dict[str, A
         "contentUrls": audio_urls,
         "properties": {
             "timeToLiveHours": 48,
+            # diarization は mono 入力前提。channels=[0] を明示してステレオ MP3 でも安全に動作させる
+            # （channels を省略するとデフォルトで [0, 1] になり、ステレオファイルで InvalidData となる）
+            "channels": [0],
             "diarization": {"enabled": True, "maxSpeakers": 8},
             "punctuationMode": "DictatedAndAutomatic",
             "profanityFilterMode": "Masked",
@@ -461,7 +496,9 @@ def handle_new(item: Dict[str, Any]) -> None:
 
     if audio_refs:
         # Speech Batch を起動し、speech_check 状態でキューを遅延エンキュー
-        speech = submit_speech_batch([f["blob_url"] for f in audio_refs], f"teams-job-{job_id}")
+        # Storage が Shared Key 無効ポリシーでもアクセスできるよう、User Delegation SAS を付加した URL を渡す
+        signed_urls = [build_blob_sas_url(f["blob_url"]) for f in audio_refs]
+        speech = submit_speech_batch(signed_urls, f"teams-job-{job_id}")
         item.update({
             "state": "speech_check",
             "speech_transcription_id": speech["transcription_id"],
@@ -519,7 +556,13 @@ def handle_speech_check(item: Dict[str, Any]) -> None:
         item["state"] = "failed"
         item["error"] = json.dumps(status_payload, ensure_ascii=False)
         upload_json(JOBS_CONTAINER, f"{job_id}.json", item)
-        notify_bff_failed(item, "Speech 文字起こしに失敗しました。")
+        # Speech から返されたエラー詳細をユーザー向けメッセージに含める
+        speech_err = ((status_payload.get("properties") or {}).get("error") or {})
+        err_code = speech_err.get("code") or status
+        err_msg = speech_err.get("message") or ""
+        user_msg = f"Speech 文字起こしに失敗しました。({err_code}: {err_msg})" if err_msg else "Speech 文字起こしに失敗しました。"
+        logger.error("Speech transcription failed job=%s code=%s message=%s", job_id, err_code, err_msg)
+        notify_bff_failed(item, user_msg)
         return
 
     if attempt >= MAX_CHECK_ATTEMPTS:

@@ -121,6 +121,9 @@ sequenceDiagram
 - Functions から Teams に直接メッセージを送らない（必ず BFF 経由）。
 - BFF の内部コールバックは Microsoft Entra の JWT 検証で保護する。
 - App Service Easy Auth は使わず、アプリ層でトークン検証する。
+- Storage アカウントは Shared Key 無効・パブリックアクセス無効で運用し、すべての接続を UAMI で行う。
+
+実装上の詳細な注意点（identity-based 接続の各種設定、Speech Batch の入力フォーマット、LLM へ識別子を渡す際の制約、`extensionBundle` / `messageEncoding` 等）は [docs/IMPLEMENTATION_NOTES.md](docs/IMPLEMENTATION_NOTES.md) を参照してください。
 
 ## Foundry Agent の役割
 
@@ -146,6 +149,7 @@ sequenceDiagram
 - `agent/` — Foundry に Agent（ルーティング / 後処理）を作成/更新する Python スクリプト。
 - `teams/` — Teams マニフェストテンプレートとパッケージ生成スクリプト。
 - `infra/` — Azure リソース一括デプロイスクリプト。
+- `docs/` — 実装メモ・トラブルシューティング（拡張・改修担当者向け）。
 
 ## 全体ウォークスルー
 
@@ -389,12 +393,14 @@ Teams の個人チャットで Bot にメッセージを送り、`task_type` ご
 | 観点 | 確認場所 |
 |---|---|
 | 受信ログ | App Service `<bffapp>` の Application Insights / ログストリーム |
-| ジョブステート | Storage `jobs/<job-id>.json` |
+| ジョブステート | Storage `jobs/<job-id>.json`（`error` フィールドに Speech 等の生エラーが入る） |
 | 入力ファイル | Storage `input/<job-id>/...` |
 | トランスクリプト | Storage `output/<job-id>/transcript.txt` |
 | 後処理結果 | Storage `output/<job-id>/result.md` |
 | Function ログ | Function App `<funcapp>` の Application Insights |
 | Bot 接続 | Azure ポータル Bot リソース → Channels（Microsoft Teams が Running） |
+
+代表的なエラーパターンと対処は [docs/IMPLEMENTATION_NOTES.md#トラブルシューティング](docs/IMPLEMENTATION_NOTES.md#トラブルシューティング) を参照してください。
 
 ---
 
